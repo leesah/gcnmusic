@@ -1,9 +1,27 @@
-﻿from HTMLParser import HTMLParser
+﻿#!/usr/bin/env python
+
+from HTMLParser import HTMLParser
 from urllib import urlopen, urlretrieve, unquote, ContentTooShortError
 from os import makedirs, access, F_OK, listdir, rename, remove
 from pickle import dump
+from sys import argv
 
 __DEBUG__ = False
+
+def main():
+    if len(argv) < 2:
+        usage()
+        exit(1)
+    elif argv[1] in ['-p', '--path']:
+        path = argv[2]
+        ids = argv[3:]
+    else:
+        path = './'
+        ids = argv[1:]
+        
+    for id in ids:
+        download(id, path)
+    exit()
 
 def download(id, path = './', dry = False):
     if id.startswith('A'):
@@ -314,3 +332,8 @@ def debug(message):
 
 class Captchaed(Exception):
     pass
+
+def usage():
+    print argv[0], '[-p|--path <path>] <id list>'
+    
+main()
