@@ -4,32 +4,34 @@ from HTMLParser import HTMLParser
 from urllib import urlopen, urlretrieve, unquote, ContentTooShortError
 from os import makedirs, access, F_OK, listdir, rename, remove
 from pickle import dump
-from sys import argv
+from argparse import ArgumentParser
+from eyeD3 import Tag
 
 __DEBUG__ = False
 
 def main():
-    if len(argv) < 2:
-        usage()
-        exit(1)
-    elif argv[1] in ['-p', '--path']:
-        path = argv[2]
-        ids = argv[3:]
-    else:
-        path = './'
-        ids = argv[1:]
-        
-    for id in ids:
-        download(id, path)
-    exit()
 
-def download(id, path = './', dry = False):
+    parser = ArgumentParser(description='Download music from music.google.cn.')
+    parser.add_argument('-p', '--path', required=True)
+    parser.add_argument('-t', '--title')
+    parser.add_argument('id')
+    args = parser.parse_args()
+    
+    try:
+        download(args.id, args.title, args.path)
+    except Captchaed:
+        print 'CAPTCHA!', 'Refresh IP and retry.'
+        exit(100)
+
+    exit(0)
+
+def download(id, t, path = './', dry = False):
     if id.startswith('A'):
-        Artist(id, 'http://www.google.cn/music/artist?id=' + id).download(path, dry)
+        Artist(id, 'http://www.google.cn/music/artist?id=' + id).entitle(t).download(path, dry)
     elif id.startswith('B'):
-        Album(id, 'http://www.google.cn/music/album?id=' + id).download(path, dry)
+        Album(id, 'http://www.google.cn/music/album?id=' + id).entitle(t).download(path, dry)
     elif id.startswith('S'):
-        Song(id, 'http://www.google.cn/music/top100/musicdownload?id=' + id).download(path, dry)
+        song = Song(id, 'http://www.google.cn/music/top100/musicdownload?id=' + id).entitle(t).download(path, dry)
     else:
         print 'ID is not valid.'
         exit(-1)
@@ -55,9 +57,16 @@ class Artist(GoogleMusicParser):
         self.albumTitleFound = False
         self.artistFound = False
         self.artistTitleFound = False
+        self.titleGiven = False
 
         self.feed(urlopen(url).read())
     
+    def entitle(self, t):
+        if not t is None:
+            self.title = t
+            self.titleGiven = True
+        return self
+        
     def download(self, path, dry):
         print self.id, self.title
         dirname = self.id + '.' + self.title if len(self.title) > 0 else self.id
@@ -116,7 +125,7 @@ class Artist(GoogleMusicParser):
             self.artistTitleFound = False
     
     def handle_data(self, data):
-        if self.artistTitleFound:
+        if self.artistTitleFound and not self.titleGiven:
             self.title += data
 
 class Album(GoogleMusicParser):
@@ -134,13 +143,21 @@ class Album(GoogleMusicParser):
         self.albumImageFound = False
         self.albumFound = False
         self.albumTitleFound = False
+        self.titleGiven = False
 
         self.feed(urlopen(self.url).read().replace('下载', '__DOWNLOAD__').replace('《','').replace('》',''))
-    
+
+    def entitle(self, t):
+        if not t is None:
+            self.title = t
+            self.titleGiven = True
+        return self
+        
     def download(self, path, dry):
         print self.id, self.title
         dirname = self.id + '.' + self.title if len(self.title) > 0 else self.id
         path += dirname + '/'
+        cover = path + 'cover.jpg'
         
         # Make the directory
         if not access(path, F_OK):
@@ -150,9 +167,9 @@ class Album(GoogleMusicParser):
             print
         
         # Download the cover image
-        if not access(path + 'cover.jpg', F_OK):
+        if not access(cover, F_OK):
             print 'Downloading cover image...',
-            if not dry: urlretrieve(self.imageUrl, path + 'cover.jpg')
+            if not dry: urlretrieve(self.imageUrl, cover)
             print 'Done.'
             print
         
@@ -170,7 +187,7 @@ class Album(GoogleMusicParser):
                     print filename
                     break
             else:
-                Song(items[index][0], items[index][1], self).download(path, dry)
+                Song(items[index][0], items[index][1], self, cover).download(path, dry)
             print
 
     def handle_starttag(self, tag, attrs):
@@ -214,15 +231,16 @@ class Album(GoogleMusicParser):
             self.albumTitleFound = False
     
     def handle_data(self, data):
-        if self.albumTitleFound:
+        if self.albumTitleFound and not self.titleGiven:
             self.title += data
     
 class Song(GoogleMusicParser):
-    def __init__(self, id, url, album = None):
+    def __init__(self, id, url, album = None, cover = None):
         HTMLParser.__init__(self)
         self.id = id
         self.url = url
         self.album = album
+        self.cover = cover
 
         self.title = ''
         self.captchaed = False
@@ -233,20 +251,22 @@ class Song(GoogleMusicParser):
         self.fileFormatFound = False
         self.fileUrlFound = False
         self.contractInfoFound = False
+        self.titleGiven = False
         
         self.feed(urlopen(url).read())
     
+    def entitle(self, t):
+        if not t is None:
+            self.title = t
+            self.titleGiven = True
+        return self
+        
     def download(self, path, dry):
         print self.id, self.title
         debug('id = ' + self.id)
         debug('url = ' + self.url)
 
-        if self.captchaed:
-            print 'CAPTCHA!', 'Refresh IP and retry.'
-            if not dry:
-                raise Captchaed()
-            
-        elif not hasattr(self, 'fileUrl'):
+        if not hasattr(self, 'fileUrl'):
             print 'Unavailable.', 'This song is unavailable for downloading.'
             
         else:
@@ -261,21 +281,34 @@ class Song(GoogleMusicParser):
                 try:
                     # This is where the downloading actually happens.
                     urlretrieve(self.fileUrl, tmpname, __progress)
-                    rename(tmpname, realname)
                 except ContentTooShortError:
                     print 'Failed.', 'Removing incomplete file...',
                     remove(tmpname)
-                    
+
+                tag = Tag()
+                tag.link(tmpname)
+                tag.setTitle(self.title)
+                if not self.cover is None:
+                    tag.addImage(3, self.cover)
+                if not self.album is None: 
+                    tag.setAlbum(self.album.title)
+                    if not self.album.artist is None:
+                        tag.setArtist(self.album.artist.title)
+                tag.removeComments()
+                tag.update()
+
+                rename(tmpname, realname)
                 print 'Done.'
         
     def handle_starttag(self, tag, attrs):
-        if self.captchaed:
-            return
-            
         attrs = dict(attrs)
         
+        # <div class="captcha"
+        if tag == 'div' and attrs.has_key('class') and attrs['class'] == "captcha":
+            raise Captchaed()
+                    
         # <tr class="meta-data-tr"
-        if not self.metaDataFound and tag == 'tr' and attrs.has_key('class') and attrs['class'] == "meta-data-tr":
+        elif not self.metaDataFound and tag == 'tr' and attrs.has_key('class') and attrs['class'] == "meta-data-tr":
             self.metaDataFound = True
         
         # <td class="td-song-name"
@@ -297,10 +330,7 @@ class Song(GoogleMusicParser):
         # <a href="/music/top100/url?q=...
         elif self.fileUrlFound and not self.contractInfoFound and tag == 'a' and attrs.has_key('href'):
             self.fileUrl = unquote(attrs['href'][20:attrs['href'].index('&')])
-        
-        # <div class="captcha"
-        elif tag == 'div' and attrs.has_key('class') and attrs['class'] == "captcha":
-            self.captchaed = True
+
 
     def handle_endtag(self, tag):
         if self.metaDataFound and tag == 'tr':
@@ -319,7 +349,7 @@ class Song(GoogleMusicParser):
             self.fileUrlFound = False
         
     def handle_data(self, data):
-        if self.songTitleFound:
+        if self.songTitleFound and not self.titleGiven:
             debug('Raw data for title: ' + data)
             self.title += data.replace('/', ', ')
         
@@ -333,7 +363,4 @@ def debug(message):
 class Captchaed(Exception):
     pass
 
-def usage():
-    print argv[0], '[-p|--path <path>] <id list>'
-    
 main()
