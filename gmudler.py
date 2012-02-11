@@ -22,6 +22,9 @@ def main():
     except Captchaed:
         print 'CAPTCHA!', 'Refresh IP and retry.'
         exit(100)
+    except ContentTooShortError:
+        print 'Network error.'
+        exit(100)
 
     exit(0)
 
@@ -140,6 +143,7 @@ class Album(GoogleMusicParser):
 
         self.title = ''
         self.songList = {}
+        self.retryList = {}
         
         # Process controlers
         self.songListFound = False
@@ -188,12 +192,25 @@ class Album(GoogleMusicParser):
             print self.id, self.title, '[%02d/%02d]' % (index + 1, count),
             for filename in existings:
                 if filename.startswith(items[index][0]) and not filename.endswith('.tmp'):
-                    print 'File found.', 'Skipping...'
-                    print filename
+                    print 'File found:', filename
                     break
             else:
-                Song(items[index][0], items[index][1], self, cover).download(path, dry)
+                try:
+                    Song(items[index][0], items[index][1], self, cover).download(path, dry)
+                except ContentTooShortError:
+                    print 'Will retry later.'
+                    self.retryList[items[index][0]] = items[index][1]
             print
+
+        items = self.retryList.items()
+        count = len(items)
+        for index in range(0, count):
+            print 'Retrying:', self.id, self.title, '[%02d/%02d]' % (index + 1, count),
+            Song(items[index][0], items[index][1], self, cover).download(path, dry)
+
+            print
+
+        
 
     def handle_starttag(self, tag, attrs):
         attrs = dict(attrs)
@@ -286,15 +303,17 @@ class Song(GoogleMusicParser):
                 def __progress(count, size, total):
                     if count % 200 == 100: print '%d%%' % (count * size * 100 / total)
 
+                # This is where the downloading actually happens.
                 try:
-                    # This is where the downloading actually happens.
                     urlretrieve(self.fileUrl, tmpname, __progress)
                 except ContentTooShortError:
                     print 'Failed.', 'Removing incomplete file...',
                     remove(tmpname)
                     print 'Done.'
-                    return
+                    raise
 
+                # Update ID3 info.
+                print 'Updating ID3 info...'
                 tag = Tag()
                 tag.link(tmpname)
                 tag.setVersion(ID3_V2_4)
@@ -309,7 +328,9 @@ class Song(GoogleMusicParser):
                 tag.removeComments()
                 tag.update(ID3_V2_4)
 
+                # Save with real name.
                 rename(tmpname, realname)
+
                 print 'Done.'
         
     def handle_starttag(self, tag, attrs):
