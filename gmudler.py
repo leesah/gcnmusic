@@ -5,7 +5,7 @@ from urllib import urlopen, urlretrieve, unquote, ContentTooShortError
 from os import makedirs, access, F_OK, listdir, rename, remove
 from pickle import dump
 from argparse import ArgumentParser
-from eyeD3 import Tag
+from eyeD3 import Tag, UTF_8_ENCODING, ID3_V2_4
 
 __DEBUG__ = False
 
@@ -62,9 +62,11 @@ class Artist(GoogleMusicParser):
         self.feed(urlopen(url).read())
     
     def entitle(self, t):
-        if not t is None:
+        if t is not None:
+            print 'Using given title:', t
             self.title = t
             self.titleGiven = True
+
         return self
         
     def download(self, path, dry):
@@ -103,8 +105,8 @@ class Artist(GoogleMusicParser):
             url = attrs['href']
             self.albumList[url.split('id%3D')[1].split('&')[0]] = 'http://www.google.cn' + url
         
-        # <table class="ArtistInfo rightmargininnerinfo"
-        elif not self.artistFound and tag == 'table' and attrs.has_key('class') and attrs['class'] == "ArtistInfo rightmargininnerinfo":
+        # <table class="ArtistInfo" or <table class="ArtistInfo rightmargininnerinfo"
+        elif not self.artistFound and tag == 'table' and attrs.has_key('class') and attrs['class'].startswith("ArtistInfo"):
             self.artistFound = True
         
         # <td class="Title"
@@ -126,6 +128,7 @@ class Artist(GoogleMusicParser):
     
     def handle_data(self, data):
         if self.artistTitleFound and not self.titleGiven:
+            debug('Raw data for title: ' + data)
             self.title += data
 
 class Album(GoogleMusicParser):
@@ -148,9 +151,11 @@ class Album(GoogleMusicParser):
         self.feed(urlopen(self.url).read().replace('下载', '__DOWNLOAD__').replace('《','').replace('》',''))
 
     def entitle(self, t):
-        if not t is None:
+        if t is not None:
+            print 'Using given title:', t
             self.title = t
             self.titleGiven = True
+
         return self
         
     def download(self, path, dry):
@@ -209,8 +214,8 @@ class Album(GoogleMusicParser):
         elif self.albumImageFound and tag =='img' and attrs.has_key('class') and attrs['class'] == "thumb-img" and attrs.has_key('src'):
             self.imageUrl = attrs['src']
         
-        # <table class="AlbumInfo rightmargininnerinfo"
-        elif not self.albumFound and tag == 'table' and attrs.has_key('class') and attrs['class'] == "AlbumInfo rightmargininnerinfo":
+        # <table class="AlbumInfo" or <table class="AlbumInfo rightmargininnerinfo"
+        elif not self.albumFound and tag == 'table' and attrs.has_key('class') and attrs['class'].startswith("AlbumInfo"):
             self.albumFound = True
         
         # <span class="Title"
@@ -232,6 +237,7 @@ class Album(GoogleMusicParser):
     
     def handle_data(self, data):
         if self.albumTitleFound and not self.titleGiven:
+            debug('Raw data for title: ' + data)
             self.title += data
     
 class Song(GoogleMusicParser):
@@ -256,9 +262,11 @@ class Song(GoogleMusicParser):
         self.feed(urlopen(url).read())
     
     def entitle(self, t):
-        if not t is None:
+        if t is not None:
+            print 'Using given title:', t
             self.title = t
             self.titleGiven = True
+
         return self
         
     def download(self, path, dry):
@@ -284,18 +292,22 @@ class Song(GoogleMusicParser):
                 except ContentTooShortError:
                     print 'Failed.', 'Removing incomplete file...',
                     remove(tmpname)
+                    print 'Done.'
+                    return
 
                 tag = Tag()
                 tag.link(tmpname)
+                tag.setVersion(ID3_V2_4)
+                tag.setTextEncoding(UTF_8_ENCODING)
                 tag.setTitle(self.title)
-                if not self.cover is None:
+                if self.cover is not None:
                     tag.addImage(3, self.cover)
-                if not self.album is None: 
+                if self.album is not None: 
                     tag.setAlbum(self.album.title)
-                    if not self.album.artist is None:
+                    if self.album.artist is not None:
                         tag.setArtist(self.album.artist.title)
                 tag.removeComments()
-                tag.update()
+                tag.update(ID3_V2_4)
 
                 rename(tmpname, realname)
                 print 'Done.'
