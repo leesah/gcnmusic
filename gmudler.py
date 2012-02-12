@@ -1,43 +1,57 @@
 ﻿#!/usr/bin/env python
 
+from argparse import ArgumentParser
 from HTMLParser import HTMLParser
 from urllib import urlopen, urlretrieve, unquote, ContentTooShortError
 from os import makedirs, access, F_OK, listdir, rename, remove
-from pickle import dump
-from argparse import ArgumentParser
+from sys import stdout
+from socket import error
 from eyeD3 import Tag, UTF_8_ENCODING, ID3_V2_4
 
-__DEBUG__ = False
+parser = ArgumentParser(description='Download music from music.google.cn.')
+parser.add_argument('-p', '--path', required=True, help='the path where you want the files to be saved to')
+parser.add_argument('-t', '--title', help='the title of either an artist, an album, or a song, depending on the type of the given id')
+parser.add_argument('-v', '--verbose', action='store_const', const=True, default=False, help='turn on verbose mode')
+parser.add_argument('id', help='an id of either an artist, an album, or a song')
+args = parser.parse_args()
 
 def main():
 
-    parser = ArgumentParser(description='Download music from music.google.cn.')
-    parser.add_argument('-p', '--path', required=True)
-    parser.add_argument('-t', '--title')
-    parser.add_argument('id')
-    args = parser.parse_args()
-    
     try:
-        download(args.id, args.title, args.path)
-    except Captchaed:
+        download(args.id, args.title.decode('utf-8', 'ignore'), args.path)
+        
+    except InvalidId:
+        print 'Invalid ID:', args.id
+        exit(-1)
+        
+    except Captcha:
+        print
         print 'CAPTCHA!', 'Refresh IP and retry.'
         exit(100)
-    except ContentTooShortError:
-        print 'Network error.'
-        exit(100)
+        
+    except KeyboardInterrupt:
+        print
+        print 'Cancelled.'
+        exit(0)
 
-    exit(0)
-
-def download(id, t, path = './', dry = False):
-    if id.startswith('A'):
-        Artist(id, 'http://www.google.cn/music/artist?id=' + id).entitle(t).download(path, dry)
-    elif id.startswith('B'):
-        Album(id, 'http://www.google.cn/music/album?id=' + id).entitle(t).download(path, dry)
-    elif id.startswith('S'):
-        song = Song(id, 'http://www.google.cn/music/top100/musicdownload?id=' + id).entitle(t).download(path, dry)
-    else:
-        print 'ID is not valid.'
+    except Exception as e:
+        print
+        print 'Network failure.', 'Check connection and retry.'
+        print e
         exit(-1)
+
+    else:
+        exit(0)
+
+def download(id, t, path = './'):
+    if id.startswith('A'):
+        Artist(id, 'http://www.google.cn/music/artist?id=' + id).entitle(t).download(path)
+    elif id.startswith('B'):
+        Album(id, 'http://www.google.cn/music/album?id=' + id).entitle(t).download(path)
+    elif id.startswith('S'):
+        Song(id, 'http://www.google.cn/music/top100/musicdownload?id=' + id).entitle(t).download(path)
+    else:
+        raise InvalidId()
 
 class GoogleMusicParser(HTMLParser):
     def handle_charref(self, name):
@@ -66,13 +80,13 @@ class Artist(GoogleMusicParser):
     
     def entitle(self, t):
         if t is not None:
-            print 'Using given title:', t
+            debug('Using given title:' + t)
             self.title = t
             self.titleGiven = True
 
         return self
         
-    def download(self, path, dry):
+    def download(self, path):
         print self.id, self.title
         dirname = self.id + '.' + self.title if len(self.title) > 0 else self.id
         path += dirname + '/'
@@ -80,16 +94,16 @@ class Artist(GoogleMusicParser):
         # Make the directory
         if not access(path, F_OK):
             print 'Making directory "%s"...' % path,
-            if not dry: makedirs(path)
+            makedirs(path)
             print 'Done.'
             print
             
-        # Process all albums, no matter it's a dry run or not
+        # Process all albums
         items = self.albumList.items()
         count = len(items)
         for index in range(0, count):
             print self.id, self.title, '[%02d/%02d]' % (index + 1, count),
-            Album(items[index][0], items[index][1], self).download(path, dry)
+            Album(items[index][0], items[index][1], self).download(path)
             print
 
     def handle_starttag(self, tag, attrs):
@@ -156,13 +170,13 @@ class Album(GoogleMusicParser):
 
     def entitle(self, t):
         if t is not None:
-            print 'Using given title:', t
+            debug('Using given title:' + t)
             self.title = t
             self.titleGiven = True
 
         return self
         
-    def download(self, path, dry):
+    def download(self, path):
         print self.id, self.title
         dirname = self.id + '.' + self.title if len(self.title) > 0 else self.id
         path += dirname + '/'
@@ -171,43 +185,44 @@ class Album(GoogleMusicParser):
         # Make the directory
         if not access(path, F_OK):
             print 'Making directory "%s"...' % path,
-            if not dry: makedirs(path)
+            makedirs(path)
             print 'Done.'
             print
         
         # Download the cover image
         if not access(cover, F_OK):
             print 'Downloading cover image...',
-            if not dry: urlretrieve(self.imageUrl, cover)
+            urlretrieve(self.imageUrl, cover)
             print 'Done.'
             print
         
         # List all files in the directory
-        existings = {} if dry else listdir(path)
+        existings = listdir(path)
         
-        # Process all songs, no matter it's a dry run or not
+        # Process all songs
         items = self.songList.items()
         count = len(items)
         for index in range(0, count):
             print self.id, self.title, '[%02d/%02d]' % (index + 1, count),
             for filename in existings:
                 if filename.startswith(items[index][0]) and not filename.endswith('.tmp'):
+                    print
                     print 'File found:', filename
                     break
             else:
                 try:
-                    Song(items[index][0], items[index][1], self, cover).download(path, dry)
-                except ContentTooShortError:
+                    Song(items[index][0], items[index][1], self, cover).download(path)
+                except (ContentTooShortError, error):
                     print 'Will retry later.'
                     self.retryList[items[index][0]] = items[index][1]
             print
 
+        # Retry once
         items = self.retryList.items()
         count = len(items)
         for index in range(0, count):
             print 'Retrying:', self.id, self.title, '[%02d/%02d]' % (index + 1, count),
-            Song(items[index][0], items[index][1], self, cover).download(path, dry)
-
+            Song(items[index][0], items[index][1], self, cover).download(path)
             print
 
         
@@ -266,7 +281,6 @@ class Song(GoogleMusicParser):
         self.cover = cover
 
         self.title = ''
-        self.captchaed = False
         
         # Process controlers
         self.metaDataFound = False
@@ -280,65 +294,61 @@ class Song(GoogleMusicParser):
     
     def entitle(self, t):
         if t is not None:
-            print 'Using given title:', t
+            debug('Using given title:' + t)
             self.title = t
             self.titleGiven = True
 
         return self
         
-    def download(self, path, dry):
+    def download(self, path):
         print self.id, self.title
         debug('id = ' + self.id)
         debug('url = ' + self.url)
 
         if not hasattr(self, 'fileUrl'):
-            print 'Unavailable.', 'This song is unavailable for downloading.'
+            print 'Done.', 'This song is unavailable for downloading.'
+            return
             
-        else:
-            debug('fileUrl = ' + self.fileUrl)
-            
-            if not dry:
-                tmpname = path + self.id + '.tmp'
-                realname = path + self.id + '.' + self.title + '.' + self.fileFormat
-                def __progress(count, size, total):
-                    if count % 200 == 100: print '%d%%' % (count * size * 100 / total)
+        debug('fileUrl = ' + self.fileUrl)
+        
+        tmpname = path + self.id + '.tmp'
+        realname = path + self.id + '.' + self.title + '.' + self.fileFormat
 
-                # This is where the downloading actually happens.
-                try:
-                    urlretrieve(self.fileUrl, tmpname, __progress)
-                except ContentTooShortError:
-                    print 'Failed.', 'Removing incomplete file...',
-                    remove(tmpname)
-                    print 'Done.'
-                    raise
+        # This is where the downloading actually happens.
+        try:
+            urlretrieve(self.fileUrl, tmpname, download_progress)
+        except:
+            if access(tmpname, F_OK):
+                remove(tmpname)
+            raise
 
-                # Update ID3 info.
-                print 'Updating ID3 info...'
-                tag = Tag()
-                tag.link(tmpname)
-                tag.setVersion(ID3_V2_4)
-                tag.setTextEncoding(UTF_8_ENCODING)
-                tag.setTitle(self.title)
-                if self.cover is not None:
-                    tag.addImage(3, self.cover)
-                if self.album is not None: 
-                    tag.setAlbum(self.album.title)
-                    if self.album.artist is not None:
-                        tag.setArtist(self.album.artist.title)
-                tag.removeComments()
-                tag.update(ID3_V2_4)
+        # Update ID3 info.
+        print 'Updating ID3 info...'
+        tag = Tag()
+        tag.link(tmpname)
+        tag.setVersion(ID3_V2_4)
+        tag.setTextEncoding(UTF_8_ENCODING)
+        tag.setTitle(self.title)
+        if self.cover is not None:
+            tag.addImage(3, self.cover)
+        if self.album is not None: 
+            tag.setAlbum(self.album.title)
+            if self.album.artist is not None:
+                tag.setArtist(self.album.artist.title)
+        tag.removeComments()
+        tag.update(ID3_V2_4)
 
-                # Save with real name.
-                rename(tmpname, realname)
+        # Save with real name.
+        rename(tmpname, realname)
 
-                print 'Done.'
+        print 'Done.'
         
     def handle_starttag(self, tag, attrs):
         attrs = dict(attrs)
         
         # <div class="captcha"
         if tag == 'div' and attrs.has_key('class') and attrs['class'] == "captcha":
-            raise Captchaed()
+            raise Captcha()
                     
         # <tr class="meta-data-tr"
         elif not self.metaDataFound and tag == 'tr' and attrs.has_key('class') and attrs['class'] == "meta-data-tr":
@@ -389,11 +399,21 @@ class Song(GoogleMusicParser):
         if self.fileFormatFound:
             self.fileFormat = data.lower()
             
+def download_progress(count, size, total):
+    if count * size >= total:
+        print '100%'
+    elif count % 200 == 100:
+        print '%d%%...' % (count * size * 100 / total),
+        stdout.flush()
+
 def debug(message):
-    if __DEBUG__:
+    if args.verbose:
         print '[DEBUG]', message
 
-class Captchaed(Exception):
+class Captcha(Exception):
+    pass
+
+class InvalidId(Exception):
     pass
 
 main()
