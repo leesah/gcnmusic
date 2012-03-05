@@ -7,10 +7,12 @@ from os import makedirs, access, F_OK, listdir, rename, remove
 from sys import stdout
 from socket import error
 from eyeD3 import Tag, UTF_8_ENCODING, ID3_V2_4
+from subprocess import call
 
 parser = ArgumentParser(description='Download music from music.google.cn.')
 parser.add_argument('-p', '--path', required=True, help='the path where you want the files to be saved to')
 parser.add_argument('-t', '--title', help='the title of either an artist, an album, or a song, depending on the type of the given id')
+parser.add_argument('-r', '--refresher', help='a command line utilily that can refresh your IP address')
 parser.add_argument('-v', '--verbose', action='store_const', const=True, default=False, help='turn on verbose mode')
 parser.add_argument('id', help='an id of either an artist, an album, or a song')
 args = parser.parse_args()
@@ -18,13 +20,13 @@ args = parser.parse_args()
 def main():
 
     try:
-        download(args.id, args.title.decode('utf-8', 'ignore'), args.path)
+        download(args.id, args.title, args.path if args.path.endswith('/') else args.path + '/')
         
     except InvalidId:
         print 'Invalid ID:', args.id
         exit(-1)
         
-    except Captcha:
+    except UnfixableCaptcha:
         print
         print 'CAPTCHA!', 'Refresh IP and retry.'
         exit(100)
@@ -36,13 +38,14 @@ def main():
 
     except Exception as e:
         print
-        print 'Network failure.', 'Check connection and retry.'
+        print 'Network failure or other error.', 'Check connection and retry.'
         print e
         exit(-1)
 
     else:
+        print 'ALL DONE.'
         exit(0)
-
+    
 def download(id, t, path = './'):
     if id.startswith('A'):
         Artist(id, 'http://www.google.cn/music/artist?id=' + id).entitle(t).download(path)
@@ -51,7 +54,7 @@ def download(id, t, path = './'):
     elif id.startswith('S'):
         Song(id, 'http://www.google.cn/music/top100/musicdownload?id=' + id).entitle(t).download(path)
     else:
-        raise InvalidId()
+        raise InvalidId(id)
 
 class GoogleMusicParser(HTMLParser):
     def handle_charref(self, name):
@@ -81,7 +84,7 @@ class Artist(GoogleMusicParser):
     def entitle(self, t):
         if t is not None:
             debug('Using given title:' + t)
-            self.title = t
+            self.title = t.decode('utf-8', 'ignore')
             self.titleGiven = True
 
         return self
@@ -157,7 +160,7 @@ class Album(GoogleMusicParser):
 
         self.title = ''
         self.songList = {}
-        self.retryList = {}
+        self.existings = {}
         
         # Process controlers
         self.songListFound = False
@@ -165,13 +168,14 @@ class Album(GoogleMusicParser):
         self.albumFound = False
         self.albumTitleFound = False
         self.titleGiven = False
+        
 
         self.feed(urlopen(self.url).read().replace('下载', '__DOWNLOAD__').replace('《','').replace('》',''))
 
     def entitle(self, t):
         if t is not None:
             debug('Using given title:' + t)
-            self.title = t
+            self.title = t.decode('utf-8', 'ignore')
             self.titleGiven = True
 
         return self
@@ -182,8 +186,11 @@ class Album(GoogleMusicParser):
         path += dirname + '/'
         cover = path + 'cover.jpg'
         
-        # Make the directory
-        if not access(path, F_OK):
+        if access(path, F_OK):
+            # List all files in the directory
+            self.existings = listdir(path)
+        else:
+            # Make the directory
             print 'Making directory "%s"...' % path,
             makedirs(path)
             print 'Done.'
@@ -196,36 +203,53 @@ class Album(GoogleMusicParser):
             print 'Done.'
             print
         
-        # List all files in the directory
-        existings = listdir(path)
         
-        # Process all songs
         items = self.songList.items()
         count = len(items)
+        
+        # For all songs
         for index in range(0, count):
             print self.id, self.title, '[%02d/%02d]' % (index + 1, count),
-            for filename in existings:
-                if filename.startswith(items[index][0]) and not filename.endswith('.tmp'):
-                    print
-                    print 'File found:', filename
-                    break
+            
+            # Skip all those that exist
+            existing = self.lookup_existings(items[index][0])
+            if existing is not None:
+                print
+                print 'File found:', existing
+            
+            # ..., and for those that don't...
             else:
-                try:
-                    Song(items[index][0], items[index][1], self, cover).download(path)
-                except (ContentTooShortError, error):
-                    print 'Will retry later.'
-                    self.retryList[items[index][0]] = items[index][1]
-            print
+                retried = False            
+                # Keep trying until succeeds or runs into unfixable errors
+                while True:
+                    try:
+                        Song(items[index][0], items[index][1], self, cover).download(path)
 
-        # Retry once
-        items = self.retryList.items()
-        count = len(items)
-        for index in range(0, count):
-            print 'Retrying:', self.id, self.title, '[%02d/%02d]' % (index + 1, count),
-            Song(items[index][0], items[index][1], self, cover).download(path)
+                    # Captcha is fixable by refreshing IP address
+                    except Captcha as c:
+                        print 'CAPTCHA!', 'Trying to fix it...'
+                        fix_captcha(c)
+                    
+                    # Network errors worth retrying, but only once
+                    except (ContentTooShortError, error):
+                        if retried:
+                            raise
+                        else:
+                            print 'Will retry once.'
+                            retried = True
+                            continue
+                    
+                    # Simply stop trying if succeeded
+                    else:
+                        break
             print
+                        
 
-        
+    def lookup_existings(self, keyword):
+        for existing in self.existings:
+            if existing.startswith(keyword) and not existing.endswith('.tmp'):
+                return existing
+        return None
 
     def handle_starttag(self, tag, attrs):
         attrs = dict(attrs)
@@ -295,7 +319,7 @@ class Song(GoogleMusicParser):
     def entitle(self, t):
         if t is not None:
             debug('Using given title:' + t)
-            self.title = t
+            self.title = t.decode('utf-8', 'ignore')
             self.titleGiven = True
 
         return self
@@ -306,7 +330,7 @@ class Song(GoogleMusicParser):
         debug('url = ' + self.url)
 
         if not hasattr(self, 'fileUrl'):
-            print 'Done.', 'This song is unavailable for downloading.'
+            print 'File URL unavailable.'
             return
             
         debug('fileUrl = ' + self.fileUrl)
@@ -348,7 +372,8 @@ class Song(GoogleMusicParser):
         
         # <div class="captcha"
         if tag == 'div' and attrs.has_key('class') and attrs['class'] == "captcha":
-            raise Captcha()
+            print
+            raise Captcha(self.id)
                     
         # <tr class="meta-data-tr"
         elif not self.metaDataFound and tag == 'tr' and attrs.has_key('class') and attrs['class'] == "meta-data-tr":
@@ -406,14 +431,25 @@ def download_progress(count, size, total):
         print '%d%%...' % (count * size * 100 / total),
         stdout.flush()
 
+def fix_captcha(captcha):
+    if args.refresher is None or 0 != call(args.refresher):
+        raise UnfixableCaptcha(captcha)
+            
+
 def debug(message):
     if args.verbose:
         print '[DEBUG]', message
 
 class Captcha(Exception):
-    pass
+    def __init__(self, id):
+        self.id = id
+
+class UnfixableCaptcha(Exception):
+    def __init__(self, captcha):
+        self.captcha = captcha
 
 class InvalidId(Exception):
-    pass
+    def __init__(self, id):
+        self.id = id
 
 main()
